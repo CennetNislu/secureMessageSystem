@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # client.py
-# Secure Messaging Client (optimized + separated UI)
+# Secure Messaging Client (optimized + modern UI integration)
 
 import socket
 import threading
@@ -16,10 +16,7 @@ from Crypto.Util.Padding import pad, unpad
 from PIL import Image
 import tkinter as tk
 from tkinter import messagebox, filedialog
-from client_ui import ChatWindow
-
-
-from client_ui import SecureMessagingClientUI  # UI modülünü çağırıyoruz
+from client_ui import ChatWindow, SecureMessagingClientUI
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -80,7 +77,7 @@ class SecureMessagingClient:
             self.ui.status_label.config(text="connected to server")
             return True
         except Exception as e:
-            messagebox.showerror("error", f"cannot connect: {e}")
+            messagebox.showerror("Error", f"Cannot connect to server: {e}")
             return False
 
     # send + wait pattern
@@ -106,7 +103,9 @@ class SecureMessagingClient:
         )
         if path:
             self.selected_image = path
-            self.ui.image_label.config(text=path.split("/")[-1])
+            filename = path.split("/")[-1]
+            # Hem register hem login ekranındaki label'ları güncelle
+            self.ui.reg_image_label.config(text=f"✓ {filename}")
 
     def embed_key_in_image(self, image_path, key_bytes):
         try:
@@ -136,7 +135,7 @@ class SecureMessagingClient:
             new_img.save(buf, format="PNG")
             return buf.getvalue()
         except Exception as e:
-            messagebox.showerror("error", f"embed error: {e}")
+            messagebox.showerror("Error", f"Image embedding error: {e}")
             return None
 
     def derive_key(self, password):
@@ -145,29 +144,82 @@ class SecureMessagingClient:
 
     # ---- registration ----
     def register(self):
-        username = self.ui.username_entry.get().strip()
-        password = self.ui.password_entry.get().strip()
-        if not username or not password:
-            messagebox.showwarning("warning", "enter username and password")
+        username = self.ui.reg_username_entry.get().strip()
+        password = self.ui.reg_password_entry.get().strip()
+        
+        # Placeholder kontrolü
+        if username == "Mailinizi Giriniz" or not username:
+            messagebox.showwarning("Warning", "Please enter your email")
+            return
+        if password == "Şifrenizi Giriniz" or not password:
+            messagebox.showwarning("Warning", "Please enter your password")
             return
         if not self.selected_image:
-            messagebox.showwarning("warning", "select an image")
+            messagebox.showwarning("Warning", "Please select an image")
             return
+            
         if not self.connect():
             return
+            
         self.user_key = self.derive_key(password)
         stego = self.embed_key_in_image(self.selected_image, self.user_key)
         if not stego:
             return
-        req = {"command": "register", "username": username, "image": base64.b64encode(stego).decode("ascii")}
+            
+        req = {
+            "command": "register",
+            "username": username,
+            "image": base64.b64encode(stego).decode("ascii")
+        }
         resp = self.send_and_wait(req, timeout=10.0)
+        
         if resp and resp.get("status") == "success":
             self.username = username
-            messagebox.showinfo("ok", "registered successfully")
-            self.ui.status_label.config(text=f"logged in as {username}")
+            messagebox.showinfo("Success", "Registration successful!")
+            # Ana ekrana geç
+            self.ui.show_main(username)
             self.refresh_users()
+            self.refresh_mail()
         else:
-            messagebox.showerror("error", f"register failed: {resp}")
+            error_msg = resp.get("message", "Unknown error") if resp else "No response from server"
+            messagebox.showerror("Error", f"Registration failed: {error_msg}")
+
+    # ---- login ----
+    def login(self):
+        username = self.ui.login_username_entry.get().strip()
+        password = self.ui.login_password_entry.get().strip()
+        
+        # Placeholder kontrolü
+        if username == "Mailinizi Giriniz" or not username:
+            messagebox.showwarning("Warning", "Please enter your email")
+            return
+        if password == "Şifrenizi Giriniz" or not password:
+            messagebox.showwarning("Warning", "Please enter your password")
+            return
+            
+        if not self.connect():
+            return
+            
+        self.user_key = self.derive_key(password)
+        
+        # Login komutu (sunucunuzda login komutu varsa)
+        req = {
+            "command": "login",
+            "username": username,
+            "password": password  # veya hash'lenmiş şekilde
+        }
+        resp = self.send_and_wait(req, timeout=10.0)
+        
+        if resp and resp.get("status") == "success":
+            self.username = username
+            messagebox.showinfo("Success", "Login successful!")
+            # Ana ekrana geç
+            self.ui.show_main(username)
+            self.refresh_users()
+            self.refresh_mail()
+        else:
+            error_msg = resp.get("message", "Invalid credentials") if resp else "No response from server"
+            messagebox.showerror("Error", f"Login failed: {error_msg}")
 
     # ---- encryption helpers ----
     def encrypt_message(self, message):
@@ -191,23 +243,36 @@ class SecureMessagingClient:
     # ---- communication ----
     def refresh_users(self):
         if not self.connected or not self.username:
+            messagebox.showwarning("Warning", "You must be logged in first")
             return
+            
         resp = self.send_and_wait({"command": "get_users"}, timeout=5.0)
         if resp and resp.get("status") == "success":
             self.ui.users_listbox.delete(0, tk.END)
-            for u in resp.get("users", []):
-                self.ui.users_listbox.insert(tk.END, u)
+            users = resp.get("users", [])
+            for u in users:
+                if u != self.username:  # Kendini gösterme
+                    self.ui.users_listbox.insert(tk.END, u)
+            logging.info(f"Refreshed users list: {len(users)} users")
+        else:
+            logging.warning("Failed to refresh users")
 
     def refresh_mail(self):
         if not self.connected or not self.username:
+            messagebox.showwarning("Warning", "You must be logged in first")
             return
+            
         resp = self.send_and_wait({"command": "get_messages"}, timeout=5.0)
         if resp and resp.get("status") == "success":
             self.ui.mail_listbox.delete(0, tk.END)
-            for m in resp.get("messages", []):
+            messages = resp.get("messages", [])
+            for m in messages:
                 dec = self.decrypt_message(m["message"])
                 if dec is not None:
                     self.ui.mail_listbox.insert(tk.END, f"From {m['from']}: {dec}")
+            logging.info(f"Refreshed mail: {len(messages)} messages")
+        else:
+            logging.warning("Failed to refresh mail")
 
     def open_chat(self, event):
         sel = self.ui.users_listbox.curselection()
@@ -217,21 +282,46 @@ class SecureMessagingClient:
         ChatWindow(self, receiver)
 
     def send_message(self, receiver, message):
+        if not self.connected or not self.username:
+            messagebox.showwarning("Warning", "Not connected")
+            return False
+            
         enc = self.encrypt_message(message)
         if not enc:
             return False
-        resp = self.send_and_wait({"command": "send_message", "receiver": receiver, "message": enc}, timeout=5.0)
-        return resp and resp.get("status") == "success"
+            
+        req = {
+            "command": "send_message",
+            "receiver": receiver,
+            "message": enc
+        }
+        resp = self.send_and_wait(req, timeout=5.0)
+        
+        if resp and resp.get("status") == "success":
+            logging.info(f"Message sent to {receiver}")
+            return True
+        else:
+            logging.warning(f"Failed to send message to {receiver}")
+            return False
 
     def check_messages(self):
         if not self.connected or not self.username:
+            messagebox.showwarning("Warning", "You must be logged in first")
             return
+            
         resp = self.send_and_wait({"command": "get_messages"}, timeout=5.0)
         if resp and resp.get("status") == "success":
-            for m in resp.get("messages", []):
+            messages = resp.get("messages", [])
+            if not messages:
+                messagebox.showinfo("Messages", "No new messages")
+                return
+                
+            for m in messages:
                 dec = self.decrypt_message(m["message"])
                 if dec is not None:
-                    messagebox.showinfo(f"message from {m['from']}", dec)
+                    messagebox.showinfo(f"Message from {m['from']}", dec)
+        else:
+            messagebox.showerror("Error", "Failed to check messages")
 
     # ---- listener thread ----
     def listen_loop(self):
@@ -241,20 +331,27 @@ class SecureMessagingClient:
                 if msg is None:
                     logging.info("listen_loop: socket closed or None received")
                     break
+                    
+                # Yeni mesaj bildirimi
                 if isinstance(msg, dict) and msg.get("type") == "new_message":
                     try:
                         dec = self.decrypt_message(msg["message"])
                     except Exception:
                         dec = None
                     if dec:
-                        self.root.after(0, lambda m=dec, f=msg['from']: messagebox.showinfo(f"new message from {f}", m))
+                        sender = msg.get('from', 'Unknown')
+                        self.root.after(0, lambda m=dec, f=sender: 
+                                      messagebox.showinfo(f"New Message from {f}", m))
                     continue
+                    
+                # Normal yanıtları kuyruğa ekle
                 self.response_queue.put(msg)
+                
             except Exception as e:
                 logging.exception("listen_loop error: %s", e)
                 break
 
-        # cleanup
+        # Cleanup
         self.listener_running = False
         self.connected = False
         try:
@@ -262,7 +359,9 @@ class SecureMessagingClient:
                 self.sock.close()
         except:
             pass
-        self.root.after(0, lambda: self.ui.status_label.config(text="disconnected"))
+        self.root.after(0, lambda: self.ui.status_label.config(
+            text="not connected/ disconnected from server"))
+
 
 # ---- main ----
 if __name__ == "__main__":
