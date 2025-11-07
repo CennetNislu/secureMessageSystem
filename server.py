@@ -2,6 +2,7 @@
 # server.py
 # Improved secure messaging server
 # ascii only (no turkish characters)
+# Secure messaging server with SQLite storage, register/login with password + image
 
 import socket
 import threading
@@ -14,8 +15,12 @@ import io
 import os
 import struct
 import logging
+import sqlite3
+import hashlib
+import time
 
-DATA_FILE = "server_data.json"
+DB_FILE = "server.db"
+IMAGE_DIR = "user_images"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -24,43 +29,163 @@ class SecureMessagingServer:
         self.host = host
         self.port = port
         self.server_socket = None
-        # users: {username: {'key': bytes, 'socket': socket, 'online': bool}}
-        self.users = {}
-        # messages: {username: [ {from, message} ] }  encrypted with receiver key
-        self.messages = {}
-        # socket->username
+        # socket -> username
         self.clients = {}
         self.lock = threading.Lock()
-        self.load_data()
+        os.makedirs(IMAGE_DIR, exist_ok=True)
+        self.ensure_tables()
 
-    def save_data(self):
+    # ---- database setup ----
+    def ensure_tables(self):
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        # create users table with expected columns
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password_hash TEXT,
+            salt TEXT,
+            key TEXT,
+            image_path TEXT
+        )
+        ''')
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender TEXT,
+            receiver TEXT,
+            encrypted_message TEXT,
+            steg_image_path TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        conn.commit()
+
+        # Compatibility: if older DB exists with missing columns, try to add them
+        cursor.execute("PRAGMA table_info(users)")
+        cols = {row[1] for row in cursor.fetchall()}
+        needed = {"password_hash", "salt", "key", "image_path"}
+        for col in needed - cols:
+            try:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
+                logging.info("added missing column %s to users table", col)
+            except Exception as e:
+                logging.exception("could not add column %s: %s", col, e)
+        conn.commit()
+        conn.close()
+
+    # ---- password helpers ----
+    def hash_password(self, password, salt=None):
+        if salt is None:
+            salt = os.urandom(16)
+        else:
+            salt = base64.b64decode(salt)
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100000)
+        return base64.b64encode(dk).decode("ascii"), base64.b64encode(salt).decode("ascii")
+
+    def verify_password(self, password, stored_hash_b64, stored_salt_b64):
         try:
-            data = {
-                "users": {u: {"key": base64.b64encode(info["key"]).decode("ascii")} for u, info in self.users.items()},
-                "messages": self.messages
+            dk, _ = self.hash_password(password, salt=stored_salt_b64)
+            return dk == stored_hash_b64
+        except Exception as e:
+            logging.exception("verify_password error: %s", e)
+            return False
+
+    # ---- user / db helpers ----
+    def add_user(self, username, key_bytes, password_hash_b64, salt_b64, image_path):
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            b64key = base64.b64encode(key_bytes).decode("ascii")
+            cursor.execute("""
+                INSERT INTO users (username, password_hash, salt, key, image_path)
+                VALUES (?, ?, ?, ?, ?)
+            """, (username, password_hash_b64, salt_b64, b64key, image_path))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        except Exception as e:
+            logging.exception("add_user error: %s", e)
+            return False
+        finally:
+            conn.close()
+
+    def get_user_record(self, username):
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT username, password_hash, salt, key, image_path FROM users WHERE username = ?", (username,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "username": row[0],
+                "password_hash": row[1],
+                "salt": row[2],
+                "key_b64": row[3],
+                "image_path": row[4]
             }
-            with open(DATA_FILE, "w") as f:
-                json.dump(data, f)
-            logging.info("data saved to %s", DATA_FILE)
         except Exception as e:
-            logging.exception("save_data error: %s", e)
+            logging.exception("get_user_record error: %s", e)
+            return None
+        finally:
+            conn.close()
 
-    def load_data(self):
-        if not os.path.exists(DATA_FILE):
-            return
+    def get_user_key(self, username):
+        rec = self.get_user_record(username)
+        if not rec or not rec.get("key_b64"):
+            return None
         try:
-            with open(DATA_FILE, "r") as f:
-                data = json.load(f)
-            users = data.get("users", {})
-            for u, info in users.items():
-                key = base64.b64decode(info["key"])
-                self.users[u] = {"key": key, "socket": None, "online": False}
-            self.messages = data.get("messages", {})
-            logging.info("loaded data from %s", DATA_FILE)
+            return base64.b64decode(rec["key_b64"])
         except Exception as e:
-            logging.exception("load_data error: %s", e)
+            logging.exception("get_user_key error: %s", e)
+            return None
 
-    # ---- framing helpers: send/recv with 4-byte length prefix ----
+    def get_all_users(self):
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT username FROM users")
+            rows = cursor.fetchall()
+            return [r[0] for r in rows]
+        except Exception as e:
+            logging.exception("get_all_users error: %s", e)
+            return []
+        finally:
+            conn.close()
+
+    def save_message(self, sender, receiver, encrypted_message, steg_path=None):
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO messages (sender, receiver, encrypted_message, steg_image_path)
+                VALUES (?, ?, ?, ?)
+            """, (sender, receiver, encrypted_message, steg_path))
+            conn.commit()
+        except Exception as e:
+            logging.exception("save_message error: %s", e)
+        finally:
+            conn.close()
+
+    def get_user_messages(self, username):
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT sender, encrypted_message FROM messages WHERE receiver = ?", (username,))
+            rows = cursor.fetchall()
+            cursor.execute("DELETE FROM messages WHERE receiver = ?", (username,))
+            conn.commit()
+            return [{"from": s, "message": m} for s, m in rows]
+        except Exception as e:
+            logging.exception("get_user_messages error: %s", e)
+            return []
+        finally:
+            conn.close()
+
+    # ---- framing helpers ----
     def send_json(self, sock, obj):
         try:
             data = json.dumps(obj).encode("utf-8")
@@ -91,12 +216,11 @@ class SecureMessagingServer:
             data += packet
         return data
 
-    # ---- stego extraction ----
+    # ---- stego helpers (extraction kept, embedding placeholder) ----
     def extract_key_from_image(self, image_data):
         try:
             image = Image.open(io.BytesIO(image_data)).convert("RGBA")
             pixels = list(image.getdata())
-            # We will read first 64 bits (8 bytes) from the LSBs of channels R,G,B sequentially.
             bits = []
             for p in pixels:
                 r,g,b,a = p
@@ -106,7 +230,6 @@ class SecureMessagingServer:
                 if len(bits) >= 64: break
                 bits.append(b & 1)
                 if len(bits) >= 64: break
-            # make bytes
             key_bytes = bytearray()
             for i in range(0, 64, 8):
                 byte = 0
@@ -118,54 +241,124 @@ class SecureMessagingServer:
             logging.exception("extract_key_from_image error: %s", e)
             return None
 
+    # Placeholder for future embedding (not modifying now as you requested)
+    def embed_key_into_image(self, image_data, key_bytes):
+        # For now return original image_data (embedding deferred)
+        return image_data
+
     # ---- DES helpers ----
     def encrypt_message(self, message, key):
         try:
+            key = key[:8]  # kesin 8 byte
             cipher = DES.new(key, DES.MODE_ECB)
             padded = pad(message.encode("utf-8"), DES.block_size)
             encrypted = cipher.encrypt(padded)
             return base64.b64encode(encrypted).decode("ascii")
         except Exception as e:
-            logging.exception("encrypt_message error: %s", e)
+            logging.exception(f"encrypt_message error: {e}")
             return None
 
     def decrypt_message(self, encrypted_message, key):
         try:
+            key = key[:8]  # kesin 8 byte
             cipher = DES.new(key, DES.MODE_ECB)
             encrypted_bytes = base64.b64decode(encrypted_message)
             decrypted = cipher.decrypt(encrypted_bytes)
             unpadded = unpad(decrypted, DES.block_size)
             return unpadded.decode("utf-8")
         except Exception as e:
-            logging.exception("decrypt_message error: %s", e)
+            logging.exception(f"decrypt_message error: {e}")
             return None
 
-    # ---- handlers ----
+    # ---- command handlers ----
     def handle_register(self, client_socket, data):
         try:
-            username = data["username"]
-            image_b64 = data["image"]
-            image_data = base64.b64decode(image_b64)
-            key = self.extract_key_from_image(image_data)
-            if not key:
-                self.send_json(client_socket, {"status": "error", "message": "key not extracted"})
+            username = data.get("username")
+            password = data.get("password")
+            image_b64 = data.get("image")
+            if not username or not password or not image_b64:
+                self.send_json(client_socket, {"status": "error", "message": "missing fields"})
                 return
+
+            # check exists
+            if self.get_user_record(username):
+                self.send_json(client_socket, {"status": "error", "message": "username exists"})
+                return
+
+            # decode image
+            try:
+                image_data = base64.b64decode(image_b64)
+            except Exception:
+                self.send_json(client_socket, {"status": "error", "message": "invalid image encoding"})
+                return
+
+            ts = int(time.time())
+            fname = f"{username}_{ts}.png"
+            fpath = os.path.join(IMAGE_DIR, fname)
+            try:
+                with open(fpath, "wb") as f:
+                    f.write(image_data)
+            except Exception as e:
+                logging.exception("saving image failed: %s", e)
+                self.send_json(client_socket, {"status": "error", "message": "image save failed"})
+                return
+
+            # TRY to extract key from image (client embeds key)
+            key_bytes = self.extract_key_from_image(image_data)
+            if not key_bytes or len(key_bytes) < 8:
+                logging.warning("could not extract key from image or key too short; falling back to random key")
+                key_bytes = os.urandom(8)
+            else:
+                # ensure exactly 8 bytes
+                key_bytes = key_bytes[:8]
+
+            # hash password
+            password_hash_b64, salt_b64 = self.hash_password(password)
+
+            ok = self.add_user(username, key_bytes, password_hash_b64, salt_b64, fpath)
+            if not ok:
+                self.send_json(client_socket, {"status": "error", "message": "could not create user"})
+                try: os.remove(fpath)
+                except: pass
+                return
+
             with self.lock:
-                self.users[username] = {"key": key, "socket": client_socket, "online": True}
                 self.clients[client_socket] = username
-                if username not in self.messages:
-                    self.messages[username] = []
-            self.save_data()
+
             self.send_json(client_socket, {"status": "success", "message": "registered"})
-            logging.info("user registered: %s", username)
+            logging.info("user registered: %s (key from image: %s)", username, "yes" if key_bytes else "no")
         except Exception as e:
             logging.exception("handle_register error: %s", e)
+            self.send_json(client_socket, {"status": "error", "message": "server error"})
+        
+    def handle_login(self, client_socket, data):
+        try:
+            username = data.get("username")
+            password = data.get("password")
+            if not username or not password:
+                self.send_json(client_socket, {"status": "error", "message": "missing username/password"})
+                return
+            rec = self.get_user_record(username)
+            if not rec:
+                self.send_json(client_socket, {"status": "error", "message": "unknown user"})
+                return
+            if not self.verify_password(password, rec["password_hash"], rec["salt"]):
+                self.send_json(client_socket, {"status": "error", "message": "invalid credentials"})
+                return
+            with self.lock:
+                self.clients[client_socket] = username
+            self.send_json(client_socket, {"status": "success", "message": "logged_in"})
+            logging.info("user logged in: %s", username)
+        except Exception as e:
+            logging.exception("handle_login error: %s", e)
+            self.send_json(client_socket, {"status": "error", "message": "server error"})
 
     def handle_get_users(self, client_socket):
         try:
             with self.lock:
                 current = self.clients.get(client_socket, None)
-                users = [u for u in self.users.keys() if u != current]
+            users = self.get_all_users()
+            users = [u for u in users if u != current]
             self.send_json(client_socket, {"status": "success", "users": users})
         except Exception as e:
             logging.exception("handle_get_users error: %s", e)
@@ -175,36 +368,53 @@ class SecureMessagingServer:
             sender = self.clients.get(client_socket)
             receiver = data.get("receiver")
             encrypted_message = data.get("message")
+            
+            logging.info(f"Message request from {sender} to {receiver}")
+            
             if not sender or not receiver or not encrypted_message:
+                logging.error(f"Invalid parameters: sender={sender}, receiver={receiver}, message_exists={bool(encrypted_message)}")
                 self.send_json(client_socket, {"status": "error", "message": "invalid parameters"})
                 return
-            # decrypt with sender key
-            sender_key = self.users[sender]["key"]
+
+            sender_key = self.get_user_key(sender)
+            receiver_key = self.get_user_key(receiver)
+            
+            if not sender_key or not receiver_key:
+                logging.error(f"Unknown user(s): sender_key_exists={bool(sender_key)}, receiver_key_exists={bool(receiver_key)}")
+                self.send_json(client_socket, {"status": "error", "message": "unknown user(s)"})
+                return
+
             plain = self.decrypt_message(encrypted_message, sender_key)
             if plain is None:
+                logging.error("Cannot decrypt with sender key")
                 self.send_json(client_socket, {"status": "error", "message": "cannot decrypt with sender key"})
                 return
-            logging.info("%s -> %s: %s", sender, receiver, plain)
-            # re-encrypt with receiver key
-            if receiver not in self.users:
-                self.send_json(client_socket, {"status": "error", "message": "unknown receiver"})
-                return
-            receiver_key = self.users[receiver]["key"]
+                
+            logging.info(f"Message from {sender} to {receiver} decrypted successfully")
+
             re_enc = self.encrypt_message(plain, receiver_key)
+            if re_enc is None:
+                logging.error("Cannot encrypt for receiver")
+                self.send_json(client_socket, {"status": "error", "message": "encryption for receiver failed"})
+                return
+                
+            self.save_message(sender, receiver, re_enc)
+            logging.info(f"Message saved to database")
+
+            # notify receiver if online
             with self.lock:
-                self.messages.setdefault(receiver, []).append({"from": sender, "message": re_enc})
-            # if receiver online send notification
-            with self.lock:
-                if self.users[receiver].get("online") and self.users[receiver].get("socket"):
-                    try:
+                for sock, user in self.clients.items():
+                    if user == receiver:
                         notif = {"type": "new_message", "from": sender, "message": re_enc}
-                        self.send_json(self.users[receiver]["socket"], notif)
-                    except Exception as e:
-                        logging.exception("notify error: %s", e)
-            self.save_data()
+                        self.send_json(sock, notif)
+                        logging.info(f"Notification sent to online receiver {receiver}")
+
             self.send_json(client_socket, {"status": "success", "message": "sent"})
+            logging.info(f"Message handling completed successfully")
+            
         except Exception as e:
             logging.exception("handle_send_message error: %s", e)
+            self.send_json(client_socket, {"status": "error", "message": str(e)})
 
     def handle_get_messages(self, client_socket):
         try:
@@ -212,14 +422,13 @@ class SecureMessagingServer:
             if not username:
                 self.send_json(client_socket, {"status": "error", "message": "unknown client"})
                 return
-            with self.lock:
-                pending = self.messages.get(username, []).copy()
-                self.messages[username] = []
-            self.save_data()
+            
+            pending = self.get_user_messages(username)
             self.send_json(client_socket, {"status": "success", "messages": pending})
         except Exception as e:
             logging.exception("handle_get_messages error: %s", e)
 
+    # ---- main loop ----
     def handle_client(self, client_socket, address):
         logging.info("new connection: %s", address)
         try:
@@ -230,6 +439,8 @@ class SecureMessagingServer:
                 cmd = req.get("command")
                 if cmd == "register":
                     self.handle_register(client_socket, req)
+                elif cmd == "login":
+                    self.handle_login(client_socket, req)
                 elif cmd == "get_users":
                     self.handle_get_users(client_socket)
                 elif cmd == "send_message":
@@ -242,12 +453,13 @@ class SecureMessagingServer:
             logging.exception("client loop error: %s", e)
         finally:
             with self.lock:
-                username = self.clients.pop(client_socket, None)
-                if username and username in self.users:
-                    self.users[username]["online"] = False
-                    self.users[username]["socket"] = None
-                    logging.info("disconnected: %s", username)
-            client_socket.close()
+                user = self.clients.pop(client_socket, None)
+                if user:
+                    logging.info("disconnected: %s", user)
+            try:
+                client_socket.close()
+            except:
+                pass
 
     def start(self):
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -263,7 +475,10 @@ class SecureMessagingServer:
         except KeyboardInterrupt:
             logging.info("server stopping...")
         finally:
-            self.server_socket.close()
+            try:
+                self.server_socket.close()
+            except:
+                pass
 
 if __name__ == "__main__":
     s = SecureMessagingServer()
