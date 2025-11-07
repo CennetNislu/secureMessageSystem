@@ -262,7 +262,16 @@ class SecureMessagingClientUI:
                                       font=('Arial', 24, 'bold'),
                                       bg=self.colors['primary'], fg='white')
         self.welcome_label.pack(anchor='w')
-        
+
+        # Sign Out button
+        signout_btn = tk.Button(header, text="Sign Out", font=('Arial', 11, 'bold'),
+                                command=self.sign_out)
+        signout_btn.pack(side=tk.RIGHT, padx=10)
+
+        self.root.after(100, lambda: apply_rounded_style(
+            signout_btn, 110, 38, 12, self.colors['primary'],
+            'white', self.colors['secondary'], shadow=False))
+
         # Tabs
         tab_frame = tk.Frame(self.main_frame, bg=self.colors['primary'])
         tab_frame.pack(fill=tk.X, padx=30)
@@ -396,6 +405,18 @@ class SecureMessagingClientUI:
             
             self.mail_listbox.pack_forget()
             self.users_listbox.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+    def sign_out(self):
+        """Sign out and return to login screen."""
+        # Clear fields
+        self.login_username_entry.delete(0, tk.END)
+        self.login_password_entry.delete(0, tk.END)
+        self.login_username_entry.insert(0, "Mailinizi Giriniz")
+        self.login_password_entry.insert(0, "Şifrenizi Giriniz")
+        self.login_password_entry.config(show="")
+
+        # Return to login UI
+        self.main_frame.pack_forget()
+        self.show_login()
 
     def refresh_current_tab(self):
         """Refresh currently active tab."""
