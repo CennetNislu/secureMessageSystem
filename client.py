@@ -86,10 +86,9 @@ class SecureMessagingClient:
             with self.sock_lock:
                 send_json(self.sock, obj)
             try:
-                resp = self.response_queue.get(timeout=timeout)
-                return resp
+                return self.response_queue.get(timeout=timeout)
             except queue.Empty:
-                logging.warning("send_and_wait timeout for %s", obj.get("command"))
+                logging.error("Response timeout")
                 return None
         except Exception as e:
             logging.exception("send_and_wait error: %s", e)
@@ -169,6 +168,7 @@ class SecureMessagingClient:
         req = {
             "command": "register",
             "username": username,
+            "password": password, # veya hash'lenmiş şekilde
             "image": base64.b64encode(stego).decode("ascii")
         }
         resp = self.send_and_wait(req, timeout=10.0)
@@ -224,20 +224,22 @@ class SecureMessagingClient:
     # ---- encryption helpers ----
     def encrypt_message(self, message):
         try:
-            cipher = DES.new(self.user_key, DES.MODE_ECB)
+            key = self.user_key[:8]  # kesin 8 byte
+            cipher = DES.new(key, DES.MODE_ECB)
             enc = cipher.encrypt(pad(message.encode("utf-8"), DES.block_size))
             return base64.b64encode(enc).decode("ascii")
         except Exception as e:
-            logging.exception("encrypt error: %s", e)
+            logging.exception(f"encrypt_message error: {e}")
             return None
 
     def decrypt_message(self, enc_message):
         try:
-            cipher = DES.new(self.user_key, DES.MODE_ECB)
+            key = self.user_key[:8]  # kesin 8 byte
+            cipher = DES.new(key, DES.MODE_ECB)
             dec = cipher.decrypt(base64.b64decode(enc_message))
             return unpad(dec, DES.block_size).decode("utf-8")
         except Exception as e:
-            logging.exception("decrypt error: %s", e)
+            logging.exception(f"decrypt_message error: {e}")
             return None
 
     # ---- communication ----
@@ -286,22 +288,43 @@ class SecureMessagingClient:
             messagebox.showwarning("Warning", "Not connected")
             return False
             
+        if not message or not message.strip():
+            messagebox.showwarning("Warning", "Message cannot be empty")
+            return False
+
+        # Debug için log ekleyelim
+        logging.info(f"Attempting to send message to {receiver}")
+        logging.info(f"Connected: {self.connected}, Username: {self.username}")
+            
+        # Mesaj şifreleme
         enc = self.encrypt_message(message)
         if not enc:
+            logging.error("Message encryption failed")
+            messagebox.showerror("Error", "Could not encrypt message")
             return False
             
         req = {
             "command": "send_message",
+            "sender": self.username,  # Gönderen bilgisini ekleyelim
             "receiver": receiver,
             "message": enc
         }
+
+        logging.info("Sending message request to server...")
         resp = self.send_and_wait(req, timeout=5.0)
         
-        if resp and resp.get("status") == "success":
-            logging.info(f"Message sent to {receiver}")
+        if resp is None:
+            logging.error("No response from server")
+            messagebox.showerror("Error", "No response from server")
+            return False
+            
+        if resp.get("status") == "success":
+            logging.info(f"Message successfully sent to {receiver}")
             return True
         else:
-            logging.warning(f"Failed to send message to {receiver}")
+            error_msg = resp.get("message", "Unknown error")
+            logging.error(f"Failed to send message: {error_msg}")
+            messagebox.showerror("Error", f"Failed to send message: {error_msg}")
             return False
 
     def check_messages(self):
