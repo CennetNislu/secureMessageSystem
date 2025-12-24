@@ -19,7 +19,7 @@ import sqlite3
 import hashlib
 import time
 
-DB_FILE = "server.db"
+DB_FILE = "server2.db"
 IMAGE_DIR = "user_images"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -170,15 +170,28 @@ class SecureMessagingServer:
         finally:
             conn.close()
 
+    # server.py içindeki düzeltilmiş fonksiyon
     def get_user_messages(self, username):
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
-            cursor.execute("SELECT sender, encrypted_message FROM messages WHERE receiver = ?", (username,))
+            
+            # Mesajları tarihe göre sıralı çekelim
+            cursor.execute("""
+                SELECT sender, encrypted_message, timestamp 
+                FROM messages 
+                WHERE receiver = ? 
+                ORDER BY timestamp ASC
+            """, (username,))
+            
             rows = cursor.fetchall()
-            cursor.execute("DELETE FROM messages WHERE receiver = ?", (username,))
-            conn.commit()
-            return [{"from": s, "message": m} for s, m in rows]
+            
+            # BU SATIRI SİLDİK: cursor.execute("DELETE FROM messages WHERE receiver = ?", (username,))
+            
+            conn.commit() # Select işleminde commit şart değil ama connection yönetimi için kalsın
+            
+            # Timestamp bilgisini de dönebilirsiniz, şimdilik eski yapıya sadık kalarak dönüyoruz
+            return [{"from": s, "message": m} for s, m, t in rows]
         except Exception as e:
             logging.exception("get_user_messages error: %s", e)
             return []
@@ -218,27 +231,23 @@ class SecureMessagingServer:
 
     # ---- stego helpers (extraction kept, embedding placeholder) ----
     def extract_key_from_image(self, image_data):
+        """LSB yöntemiyle resmin ilk 64 bitinden 8 byte'lık anahtarı çıkarır[cite: 197, 199]."""
         try:
-            image = Image.open(io.BytesIO(image_data)).convert("RGBA")
+            image = Image.open(io.BytesIO(image_data)).convert("RGB")
             pixels = list(image.getdata())
-            bits = []
+            bits = ""
             for p in pixels:
-                r,g,b,a = p
-                bits.append(r & 1)
+                for color_val in p[:3]: # R, G, B değerlerini tara
+                    bits += str(color_val & 1)
+                    if len(bits) >= 64: break
                 if len(bits) >= 64: break
-                bits.append(g & 1)
-                if len(bits) >= 64: break
-                bits.append(b & 1)
-                if len(bits) >= 64: break
+            
             key_bytes = bytearray()
             for i in range(0, 64, 8):
-                byte = 0
-                for j in range(8):
-                    byte = (byte << 1) | bits[i + j]
-                key_bytes.append(byte)
+                key_bytes.append(int(bits[i:i+8], 2))
             return bytes(key_bytes)
         except Exception as e:
-            logging.exception("extract_key_from_image error: %s", e)
+            logging.error(f"Anahtar çıkarma hatası: {e}")
             return None
 
     # Placeholder for future embedding (not modifying now as you requested)
@@ -364,57 +373,41 @@ class SecureMessagingServer:
             logging.exception("handle_get_users error: %s", e)
 
     def handle_send_message(self, client_socket, data):
+        """Ödev protokolüne göre: C1 anahtarıyla çöz, C2 anahtarıyla şifrele."""
         try:
             sender = self.clients.get(client_socket)
             receiver = data.get("receiver")
-            encrypted_message = data.get("message")
+            enc_msg_from_c1 = data.get("message")
             
-            logging.info(f"Message request from {sender} to {receiver}")
-            
-            if not sender or not receiver or not encrypted_message:
-                logging.error(f"Invalid parameters: sender={sender}, receiver={receiver}, message_exists={bool(encrypted_message)}")
-                self.send_json(client_socket, {"status": "error", "message": "invalid parameters"})
-                return
-
+            # 1. Her iki kullanıcının anahtarını DB'den al 
             sender_key = self.get_user_key(sender)
             receiver_key = self.get_user_key(receiver)
             
             if not sender_key or not receiver_key:
-                logging.error(f"Unknown user(s): sender_key_exists={bool(sender_key)}, receiver_key_exists={bool(receiver_key)}")
-                self.send_json(client_socket, {"status": "error", "message": "unknown user(s)"})
+                self.send_json(client_socket, {"status": "error", "message": "Kullanıcı anahtarı bulunamadı."})
                 return
 
-            plain = self.decrypt_message(encrypted_message, sender_key)
-            if plain is None:
-                logging.error("Cannot decrypt with sender key")
-                self.send_json(client_socket, {"status": "error", "message": "cannot decrypt with sender key"})
+            # 2. Mesajı gönderenin (C1) anahtarıyla çöz [cite: 208]
+            plain_text = self.decrypt_message(enc_msg_from_c1, sender_key)
+            if plain_text is None:
+                self.send_json(client_socket, {"status": "error", "message": "Mesaj deşifre edilemedi."})
                 return
-                
-            logging.info(f"Message from {sender} to {receiver} decrypted successfully")
 
-            re_enc = self.encrypt_message(plain, receiver_key)
-            if re_enc is None:
-                logging.error("Cannot encrypt for receiver")
-                self.send_json(client_socket, {"status": "error", "message": "encryption for receiver failed"})
-                return
-                
-            self.save_message(sender, receiver, re_enc)
-            logging.info(f"Message saved to database")
+            # 3. Mesajı alıcının (C2) anahtarıyla tekrar şifrele [cite: 209]
+            re_encrypted_msg = self.encrypt_message(plain_text, receiver_key)
+            
+            # 4. Veritabanına kaydet (Offline mesajlaşma desteği) [cite: 203, 210]
+            self.save_message(sender, receiver, re_encrypted_msg)
 
-            # notify receiver if online
+            # 5. Alıcı online ise ona ilet [cite: 213]
             with self.lock:
                 for sock, user in self.clients.items():
                     if user == receiver:
-                        notif = {"type": "new_message", "from": sender, "message": re_enc}
-                        self.send_json(sock, notif)
-                        logging.info(f"Notification sent to online receiver {receiver}")
-
-            self.send_json(client_socket, {"status": "success", "message": "sent"})
-            logging.info(f"Message handling completed successfully")
+                        self.send_json(sock, {"type": "new_message", "from": sender, "message": re_encrypted_msg})
             
+            self.send_json(client_socket, {"status": "success", "message": "Mesaj iletildi."})
         except Exception as e:
-            logging.exception("handle_send_message error: %s", e)
-            self.send_json(client_socket, {"status": "error", "message": str(e)})
+            logging.exception("handle_send_message error")
 
     def handle_get_messages(self, client_socket):
         try:

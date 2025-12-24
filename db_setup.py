@@ -1,7 +1,7 @@
 import sqlite3
 
 # Veritabanı dosyasını oluşturur (yoksa otomatik yaratır)
-conn = sqlite3.connect("server.db")
+conn = sqlite3.connect("server2.db")
 cursor = conn.cursor()
 
 # Kullanıcılar tablosu
