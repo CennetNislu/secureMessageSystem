@@ -107,34 +107,30 @@ class SecureMessagingClient:
             self.ui.reg_image_label.config(text=f"✓ {filename}")
 
     def embed_key_in_image(self, image_path, key_bytes):
+        """8 byte'lık anahtarı LSB yöntemiyle resme saklar."""
         try:
-            img = Image.open(image_path).convert("RGBA")
+            img = Image.open(image_path).convert("RGB")
             pixels = list(img.getdata())
             bits = "".join(f"{b:08b}" for b in key_bytes)
+            
             new_pixels = []
-            bit_i = 0
+            bit_idx = 0
             for p in pixels:
-                if bit_i >= len(bits):
-                    new_pixels.append(p)
-                    continue
-                r, g, b, a = p
-                if bit_i < len(bits):
-                    r = (r & ~1) | int(bits[bit_i])
-                    bit_i += 1
-                if bit_i < len(bits):
-                    g = (g & ~1) | int(bits[bit_i])
-                    bit_i += 1
-                if bit_i < len(bits):
-                    b = (b & ~1) | int(bits[bit_i])
-                    bit_i += 1
-                new_pixels.append((r, g, b, a))
-            new_img = Image.new(img.mode, img.size)
+                r, g, b = p
+                channels = [r, g, b]
+                for i in range(3):
+                    if bit_idx < len(bits):
+                        channels[i] = (channels[i] & ~1) | int(bits[bit_idx])
+                        bit_idx += 1
+                new_pixels.append(tuple(channels))
+                
+            new_img = Image.new("RGB", img.size)
             new_img.putdata(new_pixels)
             buf = io.BytesIO()
             new_img.save(buf, format="PNG")
             return buf.getvalue()
         except Exception as e:
-            messagebox.showerror("Error", f"Image embedding error: {e}")
+            messagebox.showerror("Hata", f"Steganografi işlemi başarısız: {e}")
             return None
 
     def derive_key(self, password):
@@ -223,23 +219,24 @@ class SecureMessagingClient:
 
     # ---- encryption helpers ----
     def encrypt_message(self, message):
+        """Mesajı DES kullanarak istemci anahtarıyla şifreler."""
         try:
-            key = self.user_key[:8]  # kesin 8 byte
-            cipher = DES.new(key, DES.MODE_ECB)
-            enc = cipher.encrypt(pad(message.encode("utf-8"), DES.block_size))
-            return base64.b64encode(enc).decode("ascii")
+            cipher = DES.new(self.user_key, DES.MODE_ECB)
+            padded_text = pad(message.encode("utf-8"), DES.block_size)
+            encrypted_bytes = cipher.encrypt(padded_text)
+            return base64.b64encode(encrypted_bytes).decode("ascii")
         except Exception as e:
-            logging.exception(f"encrypt_message error: {e}")
+            logging.error(f"Şifreleme hatası: {e}")
             return None
 
     def decrypt_message(self, enc_message):
+        """Gelen mesajı DES kullanarak istemci anahtarıyla çözer[cite: 214]."""
         try:
-            key = self.user_key[:8]  # kesin 8 byte
-            cipher = DES.new(key, DES.MODE_ECB)
-            dec = cipher.decrypt(base64.b64decode(enc_message))
-            return unpad(dec, DES.block_size).decode("utf-8")
+            cipher = DES.new(self.user_key, DES.MODE_ECB)
+            decoded_bytes = base64.b64decode(enc_message)
+            decrypted_padded = cipher.decrypt(decoded_bytes)
+            return unpad(decrypted_padded, DES.block_size).decode("utf-8")
         except Exception as e:
-            logging.exception(f"decrypt_message error: {e}")
             return None
 
     # ---- communication ----
