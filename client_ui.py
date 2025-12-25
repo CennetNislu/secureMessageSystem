@@ -5,10 +5,6 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext
 from PIL import Image, ImageTk, ImageDraw, ImageFilter
 
-
-# ================================================================
-# 🔶 ROUNDED CORNER + HOVER + SHADOW UTILITIES
-# ================================================================
 def create_rounded_image(width, height, radius, color, shadow=False):
     """Create a rounded rectangle PIL image with optional shadow."""
     img = Image.new("RGBA", (width + 6, height + 6), (0, 0, 0, 0))

@@ -379,35 +379,60 @@ class SecureMessagingServer:
             receiver = data.get("receiver")
             enc_msg_from_c1 = data.get("message")
             
+            # Log Başlangıcı
+            print(f"\n--- [MESAJ İŞLEME BAŞLADI] Gönderen: {sender} -> Alıcı: {receiver} ---")
+
             # 1. Her iki kullanıcının anahtarını DB'den al 
             sender_key = self.get_user_key(sender)
             receiver_key = self.get_user_key(receiver)
             
             if not sender_key or not receiver_key:
+                print("!!! HATA: Kullanıcı anahtarları bulunamadı.")
                 self.send_json(client_socket, {"status": "error", "message": "Kullanıcı anahtarı bulunamadı."})
                 return
 
-            # 2. Mesajı gönderenin (C1) anahtarıyla çöz [cite: 208]
+            # 2. Mesajı gönderenin (C1) anahtarıyla çöz
             plain_text = self.decrypt_message(enc_msg_from_c1, sender_key)
             if plain_text is None:
+                print(f"!!! HATA: Mesaj {sender} kullanıcısının anahtarıyla çözülemedi.")
                 self.send_json(client_socket, {"status": "error", "message": "Mesaj deşifre edilemedi."})
                 return
+            
+            # --> İSTENEN LOG 1:
+            print(f"1. ADIM: {sender}'den gelen şifreli mesaj alındı.")
+            print(f"2. ADIM: Mesaj, {sender} anahtarıyla çözüldü. Açık Metin: '{plain_text}'")
 
-            # 3. Mesajı alıcının (C2) anahtarıyla tekrar şifrele [cite: 209]
+            # 3. Mesajı alıcının (C2) anahtarıyla tekrar şifrele
             re_encrypted_msg = self.encrypt_message(plain_text, receiver_key)
             
-            # 4. Veritabanına kaydet (Offline mesajlaşma desteği) [cite: 203, 210]
-            self.save_message(sender, receiver, re_encrypted_msg)
+            # --> İSTENEN LOG 2:
+            print(f"3. ADIM: Mesaj, alıcı {receiver} anahtarıyla tekrar şifrelendi.")
 
-            # 5. Alıcı online ise ona ilet [cite: 213]
+            # 4. Veritabanına kaydet (Offline mesajlaşma desteği)
+            self.save_message(sender, receiver, re_encrypted_msg)
+            
+            # --> İSTENEN LOG 3:
+            print(f"4. ADIM: Mesaj veritabanına kaydedildi ({receiver}'in kutusuna kondu).")
+
+            # 5. Alıcı online ise ona anlık ilet
+            delivered_instantly = False
             with self.lock:
                 for sock, user in self.clients.items():
                     if user == receiver:
                         self.send_json(sock, {"type": "new_message", "from": sender, "message": re_encrypted_msg})
+                        delivered_instantly = True
+                        print(f"5. ADIM: Alıcı ({receiver}) çevrimiçi olduğu için mesaj anında iletildi.")
+            
+            if not delivered_instantly:
+                print(f"5. ADIM: Alıcı ({receiver}) çevrimdışı. Mesaj sadece veritabanında bekliyor.")
+
+            print("--- [MESAJ İŞLEME TAMAMLANDI] ---\n")
             
             self.send_json(client_socket, {"status": "success", "message": "Mesaj iletildi."})
+
         except Exception as e:
             logging.exception("handle_send_message error")
+            print(f"!!! KRİTİK HATA: {e}")
 
     def handle_get_messages(self, client_socket):
         try:
