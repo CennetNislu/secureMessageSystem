@@ -403,6 +403,8 @@ class SecureMessagingClientUI:
             self.users_listbox.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
     def sign_out(self):
         """Sign out and return to login screen."""
+        
+        self.client.logout()
         # Clear fields
         self.login_username_entry.delete(0, tk.END)
         self.login_password_entry.delete(0, tk.END)
@@ -445,11 +447,16 @@ class ChatWindow:
 
         self.win = tk.Toplevel(client.root)
         self.win.title(f"Chat: {receiver}")
-        self.win.geometry("600x500")
+        self.win.geometry("600x600")
         self.win.configure(bg='#5B4FDB')
 
+        # 🔽 ÖNCE pencereyi çiz
+        self.win.update_idletasks()
+
+        # 🔽 SONRA grab ve focus
         self.win.grab_set()
         self.win.focus_force()
+
 
         # Chat area
         chat_container = tk.Frame(self.win, bg='#8B85D8')

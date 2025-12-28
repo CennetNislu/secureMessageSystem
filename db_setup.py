@@ -20,7 +20,6 @@ CREATE TABLE IF NOT EXISTS messages (
     sender TEXT,
     receiver TEXT,
     encrypted_message TEXT,
-    steg_image_path TEXT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 ''')
