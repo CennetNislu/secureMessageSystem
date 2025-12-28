@@ -216,6 +216,39 @@ class SecureMessagingClient:
         else:
             error_msg = resp.get("message", "Invalid credentials") if resp else "No response from server"
             messagebox.showerror("Error", f"Login failed: {error_msg}")
+    
+    # ---- logout / disconnect ----
+    def logout(self):
+        logging.info("Client logout called")
+
+        if not self.connected or not self.sock:
+            logging.info("Client already disconnected")
+            return
+
+        try:
+            # server'a logout bildir
+            send_json(self.sock, {"command": "logout"})
+        except Exception as e:
+            logging.warning("Failed to send logout: %s", e)
+
+        # listener thread'i durdur
+        self.listener_running = False
+
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except:
+            pass
+
+        try:
+            self.sock.close()
+        except:
+            pass
+
+        self.sock = None
+        self.connected = False
+        self.username = None
+
+        logging.info("Client socket closed")
 
     # ---- encryption helpers ----
     def encrypt_message(self, message):

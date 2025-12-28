@@ -465,6 +465,9 @@ class SecureMessagingServer:
                     self.handle_send_message(client_socket, req)
                 elif cmd == "get_messages":
                     self.handle_get_messages(client_socket)
+                elif cmd == "logout":
+                    logging.info("logout request received")
+                    break
                 else:
                     self.send_json(client_socket, {"status": "error", "message": "unknown command"})
         except Exception as e:
