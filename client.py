@@ -157,6 +157,8 @@ class SecureMessagingClient:
             return
             
         self.user_key = self.derive_key(password)
+        # print("CLIENT KEY (derived from password):", self.user_key)
+
         stego = self.embed_key_in_image(self.selected_image, self.user_key)
         if not stego:
             return
