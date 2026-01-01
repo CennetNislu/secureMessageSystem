@@ -56,7 +56,6 @@ class SecureMessagingServer:
             sender TEXT,
             receiver TEXT,
             encrypted_message TEXT,
-            steg_image_path TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         ''')
@@ -252,8 +251,41 @@ class SecureMessagingServer:
 
     # Placeholder for future embedding (not modifying now as you requested)
     def embed_key_into_image(self, image_data, key_bytes):
-        # For now return original image_data (embedding deferred)
-        return image_data
+        """8 byte (64 bit) DES anahtarini LSB ile resme gom."""
+        try:
+            image = Image.open(io.BytesIO(image_data)).convert("RGB")
+            pixels = list(image.getdata())
+
+            # Key -> bit string (64 bit)
+            bits = "".join(f"{byte:08b}" for byte in key_bytes)
+            bit_index = 0
+
+            new_pixels = []
+
+            for pixel in pixels:
+                r, g, b = pixel
+                if bit_index < len(bits):
+                    r = (r & ~1) | int(bits[bit_index])
+                    bit_index += 1
+                if bit_index < len(bits):
+                    g = (g & ~1) | int(bits[bit_index])
+                    bit_index += 1
+                if bit_index < len(bits):
+                    b = (b & ~1) | int(bits[bit_index])
+                    bit_index += 1
+
+                new_pixels.append((r, g, b))
+
+            image.putdata(new_pixels)
+
+            output = io.BytesIO()
+            image.save(output, format="PNG")
+            
+            return output.getvalue()
+
+        except Exception as e:
+            logging.exception("embed_key_into_image error: %s", e)
+            return None
 
     # ---- DES helpers ----
     def encrypt_message(self, message, key):
@@ -314,12 +346,15 @@ class SecureMessagingServer:
 
             # TRY to extract key from image (client embeds key)
             key_bytes = self.extract_key_from_image(image_data)
-            if not key_bytes or len(key_bytes) < 8:
-                logging.warning("could not extract key from image or key too short; falling back to random key")
-                key_bytes = os.urandom(8)
-            else:
-                # ensure exactly 8 bytes
-                key_bytes = key_bytes[:8]
+            # print("SERVER EXTRACTED KEY (from image):", key_bytes)
+
+            if not key_bytes or len(key_bytes) != 8:
+                self.send_json(client_socket, {
+                    "status": "error",
+                    "message": "Key could not be extracted from image"
+                })
+                return
+
 
             # hash password
             password_hash_b64, salt_b64 = self.hash_password(password)
