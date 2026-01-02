@@ -400,12 +400,24 @@ class SecureMessagingServer:
     def handle_get_users(self, client_socket):
         try:
             with self.lock:
-                current = self.clients.get(client_socket, None)
-            users = self.get_all_users()
-            users = [u for u in users if u != current]
-            self.send_json(client_socket, {"status": "success", "users": users})
+                current = self.clients.get(client_socket)
+                online_users = set(self.clients.values())
+
+            all_users = set(self.get_all_users())
+            offline_users = all_users - online_users
+
+            # kendini listeden çıkar
+            online_users.discard(current)
+            offline_users.discard(current)
+
+            self.send_json(client_socket, {
+                "status": "success",
+                "online": list(online_users),
+                "offline": list(offline_users)
+            })
         except Exception as e:
             logging.exception("handle_get_users error: %s", e)
+
 
     def handle_send_message(self, client_socket, data):
         """Ödev protokolüne göre: C1 anahtarıyla çöz, C2 anahtarıyla şifrele."""
