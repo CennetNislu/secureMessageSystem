@@ -279,15 +279,35 @@ class SecureMessagingClient:
         if not self.connected or not self.username:
             messagebox.showwarning("Warning", "You must be logged in first")
             return
-            
+
         resp = self.send_and_wait({"command": "get_users"}, timeout=5.0)
+
         if resp and resp.get("status") == "success":
             self.ui.users_listbox.delete(0, tk.END)
-            users = resp.get("users", [])
-            for u in users:
-                if u != self.username:  # Kendini gösterme
-                    self.ui.users_listbox.insert(tk.END, u)
-            logging.info(f"Refreshed users list: {len(users)} users")
+
+            online_users = resp.get("online", [])
+            offline_users = resp.get("offline", [])
+
+            # ONLINE BAŞLIK
+            self.ui.users_listbox.insert(tk.END, "🟢 ONLINE")
+            self.ui.users_listbox.itemconfig(tk.END, fg="green")
+
+            for u in online_users:
+                self.ui.users_listbox.insert(tk.END, f"  {u}")
+
+            # boşluk
+            self.ui.users_listbox.insert(tk.END, "")
+
+            # OFFLINE BAŞLIK
+            self.ui.users_listbox.insert(tk.END, "⚪ OFFLINE")
+            self.ui.users_listbox.itemconfig(tk.END, fg="gray")
+
+            for u in offline_users:
+                self.ui.users_listbox.insert(tk.END, f"  {u}")
+
+            logging.info(
+                f"Users refreshed | online: {len(online_users)} | offline: {len(offline_users)}"
+            )
         else:
             logging.warning("Failed to refresh users")
 
@@ -312,8 +332,14 @@ class SecureMessagingClient:
         sel = self.ui.users_listbox.curselection()
         if not sel:
             return
-        receiver = self.ui.users_listbox.get(sel[0])
-        ChatWindow(self, receiver)
+
+        value = self.ui.users_listbox.get(sel[0]).strip()
+
+        # başlık veya boş satırsa geç
+        if value in ("🟢 ONLINE", "⚪ OFFLINE") or not value:
+            return
+
+        ChatWindow(self, value)
 
     def send_message(self, receiver, message):
         if not self.connected or not self.username:
