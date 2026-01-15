@@ -78,7 +78,7 @@ Sunucu, aynı anda birden fazla istemcinin sisteme kayıt olmasını ve birbirle
 ---
 
 ## 🛠️ Kullanılan Teknolojiler
-- Python / Java / C# (uygulama dili)
+- Python 
 - DES şifreleme kütüphaneleri
 - LSB Steganografi
 - Socket Programming
